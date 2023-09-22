@@ -1,0 +1,270 @@
+from fastapi import FastAPI, HTTPException, Depends, status, Query
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel
+from typing import List
+from motor.motor_asyncio import AsyncIOMotorClient
+import logging
+
+app = FastAPI()
+
+MONGO_DB_URL = 'mongodb+srv://mithilesh:password5555@eaiesb.i83cqcj.mongodb.net/'
+MONGO_DB_NAME = "FastAPI"
+department_collection_name = "Departments"
+section_collection_name = "Sections"
+student_collection_name = "Students"
+
+# Create a security scheme for basic authentication
+security = HTTPBasic()
+
+class MongoDB:
+    client: AsyncIOMotorClient = None
+
+db = MongoDB()
+
+async def get_database() -> AsyncIOMotorClient:
+    return db.client[MONGO_DB_NAME]
+
+async def connect_to_mongo():
+    db.client = AsyncIOMotorClient(MONGO_DB_URL)
+
+async def close_mongo_connection():
+    db.client.close()
+
+app.add_event_handler("startup", connect_to_mongo)
+app.add_event_handler("shutdown", close_mongo_connection)
+
+class Department(BaseModel):
+    depid: str  # Define your own department ID
+    departmentName: str
+
+class Section(BaseModel):
+    secid: str  # Define your own section ID
+    sectionName: str
+    depid: str  # Replace departmentId with depid
+
+class Student(BaseModel):
+    id: str  # Define your own student ID
+    studentName: str
+    secid: str  # Change sectionId to secid
+    depid: str
+
+class DepartmentInDB(Department):
+    depid: str
+
+class SectionInDB(Section):
+    secid: str
+
+class StudentInDB(Student):
+    id: str
+
+# Create a function to validate credentials
+async def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)):
+    if credentials.username == "mithilesh" and credentials.password == "9876":
+        return True
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+@app.get("/dep", response_model=List[DepartmentInDB])
+async def get_departments():
+    db = await get_database()
+    deps = await db[department_collection_name].find({}).to_list(None)
+    return [DepartmentInDB(**dep, depid=str(dep["_id"])) for dep in deps]
+
+@app.post("/dep", response_model=DepartmentInDB)
+async def create_department(
+        department: Department,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    department_doc = department.dict()
+
+    # Set the user-defined department ID in the document
+    depid = department_doc.pop('depid', None)
+
+    if not depid:
+        raise HTTPException(status_code=400, detail="Department ID is required.")
+
+    result = await db[department_collection_name].insert_one({**department_doc, '_id': depid})
+    created_department = await db[department_collection_name].find_one({"_id": depid})
+
+    if created_department:
+        return DepartmentInDB(**created_department, depid=str(created_department["_id"]))
+    else:
+        raise HTTPException(status_code=500, detail="Failed to create department.")
+
+@app.get("/dep/{depid}", response_model=DepartmentInDB)
+async def get_department_by_depid(depid: str):
+    db = await get_database()
+    department = await db[department_collection_name].find_one({"_id": depid})
+    if department:
+        return DepartmentInDB(**department, depid=str(department["_id"]))
+    raise HTTPException(status_code=404, detail="Department not found")
+
+@app.put("/dep/{depid}", response_model=DepartmentInDB)
+async def update_department(
+        depid: str,
+        department: Department,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    updated_department = await db[department_collection_name].find_one_and_update(
+        {"_id": depid},
+        {"$set": department.dict()},
+        return_document=True,
+    )
+    if updated_department:
+        return DepartmentInDB(**updated_department, depid=str(updated_department["_id"]))
+    raise HTTPException(status_code=404, detail="Department not found")
+
+@app.delete("/dep/{depid}", response_model=DepartmentInDB)
+async def delete_department(
+        depid: str,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    deleted_department = await db[department_collection_name].find_one_and_delete({"_id": depid})
+    if deleted_department:
+        return DepartmentInDB(**deleted_department, depid=str(deleted_department["_id"]))
+    raise HTTPException(status_code=404, detail="Department not found")
+
+# Sections endpoints
+
+@app.get("/sections", response_model=List[SectionInDB])
+async def get_sections():
+    db = await get_database()
+    sections = await db[section_collection_name].find({}).to_list(None)
+    return [SectionInDB(**sec, secid=str(sec["_id"])) for sec in sections]
+
+@app.post("/sections", response_model=SectionInDB)
+async def create_section(
+        section: Section,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    section_doc = section.dict()
+
+    # Set the user-defined section ID in the document
+    secid = section_doc.pop('secid', None)
+
+    if not secid:
+        raise HTTPException(status_code=400, detail="Section ID is required.")
+
+    result = await db[section_collection_name].insert_one({**section_doc, '_id': secid})
+    created_section = await db[section_collection_name].find_one({"_id": secid})
+
+    if created_section:
+        return SectionInDB(**created_section, secid=str(created_section["_id"]))
+    else:
+        raise HTTPException(status_code=500, detail="Failed to create section.")
+
+@app.get("/sections/{secid}", response_model=SectionInDB)
+async def get_section_by_secid(secid: str):
+    db = await get_database()
+    section = await db[section_collection_name].find_one({"_id": secid})
+    if section:
+        return SectionInDB(**section, secid=str(section["_id"]))
+    raise HTTPException(status_code=404, detail="Section not found")
+
+# New route handler to get sections by department ID
+@app.get("/sections-by-depid/{depid}", response_model=List[SectionInDB])
+async def get_sections_by_depid(depid: str):
+    try:
+        db = await get_database()
+        sections = await db[section_collection_name].find({"depid": depid}).to_list(None)
+        return [SectionInDB(**sec, secid=str(sec["_id"])) for sec in sections]
+    except Exception as e:
+        logging.error(f"Error fetching sections by depid: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+# Students endpoints
+
+@app.get("/students", response_model=List[StudentInDB])
+async def get_students():
+    db = await get_database()
+    students = await db[student_collection_name].find({}).to_list(None)
+    return [StudentInDB(**stu, id=str(stu["_id"])) for stu in students]
+
+@app.post("/students", response_model=StudentInDB)
+async def create_student(
+        student: Student,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    student_doc = student.dict()
+
+    # Set the user-defined student ID in the document
+    student_id = student_doc.pop('id', None)
+
+    if not student_id:
+        raise HTTPException(status_code=400, detail="Student ID is required.")
+
+    result = await db[student_collection_name].insert_one({**student_doc, '_id': student_id})
+    created_student = await db[student_collection_name].find_one({"_id": student_id})
+
+    if created_student:
+        return StudentInDB(**created_student, id=str(created_student["_id"]))
+    else:
+        raise HTTPException(status_code=500, detail="Failed to create student.")
+
+@app.get("/students/{student_id}", response_model=StudentInDB)
+async def get_student_by_id(student_id: str):
+    db = await get_database()
+    student = await db[student_collection_name].find_one({"_id": student_id})
+    if student:
+        return StudentInDB(**student, id=str(student["_id"]))
+    raise HTTPException(status_code=404, detail="Student not found")
+
+@app.get("/students-by-depid/{depid}", response_model=List[StudentInDB])
+async def get_students_by_depid(depid: str):
+    try:
+        db = await get_database()
+        students = await db[student_collection_name].find({"depid": depid}).to_list(None)
+        return [StudentInDB(**stu, id=str(stu["_id"])) for stu in students]
+    except Exception as e:
+        logging.error(f"Error fetching students by depid: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@app.get("/students-by-secid/{secid}", response_model=List[StudentInDB])
+async def get_students_by_secid(secid: str):
+    try:
+        db = await get_database()
+        students = await db[student_collection_name].find({"secid": secid}).to_list(None)
+        return [StudentInDB(**stu, id=str(stu["_id"])) for stu in students]
+    except Exception as e:
+        logging.error(f"Error fetching students by secid: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@app.put("/students/{student_id}", response_model=StudentInDB)
+async def update_student(
+        student_id: str,
+        student: Student,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    updated_student = await db[student_collection_name].find_one_and_update(
+        {"_id": student_id},
+        {"$set": student.dict()},
+        return_document=True,
+    )
+    if updated_student:
+        return StudentInDB(**updated_student, id=str(updated_student["_id"]))
+    raise HTTPException(status_code=404, detail="Student not found")
+
+@app.delete("/students/{student_id}", response_model=StudentInDB)
+async def delete_student(
+        student_id: str,
+        authenticated: bool = Depends(authenticate_user)
+):
+    db = await get_database()
+    deleted_student = await db[student_collection_name].find_one_and_delete({"_id": student_id})
+    if deleted_student:
+        return StudentInDB(**deleted_student, id=str(deleted_student["_id"]))
+    raise HTTPException(status_code=404, detail="Student not found")
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="localhost", port=8000)
